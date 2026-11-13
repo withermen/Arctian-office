@@ -1,0 +1,13 @@
+{
+  "name": "mercek",
+  "title": "Mercek",
+  "version": "0.8.6",
+  "category": "Ofis",
+  "publisher": "Arctian",
+  "role": "ui",
+  "fullscreen": true,
+  "w": 1280,
+  "h": 720,
+  "icon": "icon.png",
+  "permissions": ["fs", "exec"]
+}
