@@ -606,8 +606,17 @@ static void run_content(const char *c, int n)
 static int g_zi = 3;
 static const int g_zooms[6] = { 50, 67, 80, 100, 125, 150 };
 static wolf_id g_thumb[MAX_TH];
+static wolf_id g_tnum[MAX_TH];
+static wolf_id g_nolab;                     /* "Dosya yok" etiketi */
 static int g_nth;
 static wolf_id g_canvas, g_pbox, g_zbox;
+static wolf_id g_title_lab;                 /* baslik cubugundaki dosya adi */
+static wolf_id g_rv[4];                     /* sag panel deger etiketleri */
+static wolf_id g_rxbox, g_rxbody;           /* sag panel "Sinirlar" kutusu */
+static wolf_id g_st_l, g_st_r;              /* durum cubugu etiketleri */
+static wolf_id g_ov;                        /* dosya secme perdesi (hep kurulu) */
+static wolf_id g_prow[PICK_MAX], g_prow1[PICK_MAX], g_prow2[PICK_MAX];
+static wolf_id g_pickempty;
 static int g_pick;                          /* acma penceresi acik mi */
 static char g_pickv[PICK_MAX][200];
 static int g_pickn;
@@ -642,16 +651,26 @@ static void set_page_label(void)
     wolf_text(g_pbox, t);
 }
 
+/* Sol raydaki kucuk resim havuzunu (hep MAX_TH yuva) belgeye gore
+ * tazeler: gorunurluk + secili sayfa cercevesi. */
 static void refresh_thumbs(void)
 {
-    for (int k = 0; k < g_nth; k++) {
-        int on = (k + 1 == g_page);
-        wolf_style(g_thumb[k], WOLF_SP_BORDER_COLOR, on ? C_ACC : C_PLINE, 0);
-        wolf_style(g_thumb[k], WOLF_SP_BORDER_WIDTH, on ? 2 : 1, 0);
+    int has = (g_kind == 1 || g_kind == 2);
+    g_nth = has ? (g_npage < MAX_TH ? g_npage : MAX_TH) : 0;
+    for (int k = 0; k < MAX_TH; k++) {
+        int on = has && k < g_nth;
+        wolf_visible(g_thumb[k], on);
+        if (!on) continue;
+        int sel = (k + 1 == g_page);
+        wolf_style(g_thumb[k], WOLF_SP_BORDER_COLOR, sel ? C_ACC : C_PLINE, 0);
+        wolf_style(g_thumb[k], WOLF_SP_BORDER_WIDTH, sel ? 2 : 1, 0);
     }
+    if (g_nolab) wolf_visible(g_nolab, !has);
 }
 
 static void rebuild(void);
+static void refresh_view(void);
+static void pick_refresh(void);
 
 /* ---- sayfa govdesi ---- */
 static void paint_page(void)
@@ -849,7 +868,7 @@ static void open_path(const char *path)
         wolf_notify("Mercek", g_err);
     }
     g_pick = 0;
-    rebuild();
+    refresh_view();
 }
 
 static void pick_cb(wolf_id w, void *u)
@@ -859,8 +878,20 @@ static void pick_cb(wolf_id w, void *u)
     if (i >= 0 && i < g_pickn) open_path(g_pickv[i]);
 }
 
-static void cb_pick_open(wolf_id w, void *u) { (void)w; (void)u; g_pick = 1; rebuild(); }
-static void cb_pick_close(wolf_id w, void *u) { (void)w; (void)u; g_pick = 0; rebuild(); }
+static void cb_pick_open(wolf_id w, void *u)
+{
+    (void)w; (void)u;
+    pick_scan();
+    pick_refresh();
+    g_pick = 1;
+    wolf_visible(g_ov, 1);
+}
+static void cb_pick_close(wolf_id w, void *u)
+{
+    (void)w; (void)u;
+    g_pick = 0;
+    wolf_visible(g_ov, 0);
+}
 static void cb_reload(wolf_id w, void *u)
 {
     (void)w; (void)u;
@@ -889,9 +920,18 @@ static void titlebar(void)
     char t[120];
     scpy(t, sizeof t, g_name[0] ? g_name : "Dosya secilmedi");
     wolf_strcat(t, sizeof t, " — Mercek");
-    lab(tb, 12, (36 - 12) / 2, 560, t, 12, C_TXT2, -1);
+    g_title_lab = lab(tb, 12, (36 - 12) / 2, 560, t, 12, C_TXT2, -1);
     winbtn(g_w - S(92),  SVG_MIN,   cb_min,   0x262B35);
     winbtn(g_w - S(46),  SVG_CLOSE, cb_close, 0xC42B1C);
+}
+
+/* baslik cubugu metnini yerinde tazele (nesneler yeniden kurulmaz) */
+static void set_title_label(void)
+{
+    char t[120];
+    scpy(t, sizeof t, g_name[0] ? g_name : "Dosya secilmedi");
+    wolf_strcat(t, sizeof t, " — Mercek");
+    if (g_title_lab) wolf_text(g_title_lab, t);
 }
 
 /* arac cubugu dugmesi; x mantiksal (olceklenmemis) px */
@@ -938,18 +978,16 @@ static void leftpanel(void)
     bgc(lp, C_PANEL); rad(lp, 0); bgo(lp, 100); brd_c(lp, 8, C_PLINE);
     wolf_scrollable(lp, 1);
 
-    if (g_kind != 2 && g_kind != 1) {
-        lab(lp, 10, S(12), 130, "Dosya yok", 12, C_SUB, 1);
-        return;
-    }
-    g_nth = g_npage < MAX_TH ? g_npage : MAX_TH;
-    for (int i = 0; i < g_nth; i++) {
+    /* Kucuk resim yuvalari BIR KEZ kurulur. Belge degisince yalnizca
+     * gorunurluk ve cerceve tazelenir; boylece tik geri cagrilari
+     * (thumb_cb) yasamaya devam eder. */
+    g_nolab = lab(lp, 10, S(12), 130, "Dosya yok", 12, C_SUB, 1);
+    for (int i = 0; i < MAX_TH; i++) {
         int y = S(12) + i * (S(136) + S(12));
         wolf_id t = wolf_panel(lp, (S(150) - S(100)) / 2, y, S(100), S(136));
         bgc(t, C_PAGE); bgo(t, 100); rad(t, S(2));
-        int on = (i + 1 == g_page);
-        wolf_style(t, WOLF_SP_BORDER_WIDTH, on ? 2 : 1, 0);
-        wolf_style(t, WOLF_SP_BORDER_COLOR, on ? C_ACC : C_PLINE, 0);
+        wolf_style(t, WOLF_SP_BORDER_WIDTH, 1, 0);
+        wolf_style(t, WOLF_SP_BORDER_COLOR, C_PLINE, 0);
         wolf_set_click(t, 1); hov(t, 0xF0F1F4);
         wolf_on_click_ex(t, thumb_cb, (void *)(long)i);
         g_thumb[i] = t;
@@ -958,18 +996,15 @@ static void leftpanel(void)
             bgc(ln, 0xC9CED8); bgo(ln, 100); rad(ln, 0);
         }
         char n[8]; utoa2(i + 1, n);
-        lab(t, 0, S(136) - S(20), 100, n, 11, C_SUB, 1);
+        g_tnum[i] = lab(t, 0, S(136) - S(20), 100, n, 11, C_SUB, 1);
+        wolf_visible(t, 0);
     }
+    refresh_thumbs();
 }
 
-static void rightpanel(void)
+/* sag paneldeki degerleri yerinde gunceller (nesneler sabit) */
+static void refresh_right(void)
 {
-    int rx = g_w - S(250);
-    wolf_id rp = wolf_panel(g_root, rx, S(82), S(250), g_h - S(82) - S(28));
-    bgc(rp, C_PANEL); rad(rp, 0); bgo(rp, 100); brd_c(rp, 4, C_PLINE);
-
-    lab(rp, 16, S(16), 218, "Belge", 14, C_TXT, -1);
-
     const char *kind_s = "—";
     if (g_kind == 1) kind_s = "PNG goruntu";
     if (g_kind == 2) kind_s = "PDF (basit alt kume)";
@@ -1001,42 +1036,53 @@ static void rightpanel(void)
         wolf_strcat(mbs, sizeof mbs, " pt");
     }
 
-    const char *rows[5][2] = {
-        { "Tur", kind_s }, { "Boyut", szs }, { "Icerik", pgs },
-        { "Sayfa boyu", mbs }, { "", "" },
-    };
+    wolf_text(g_rv[0], kind_s);
+    wolf_text(g_rv[1], szs);
+    wolf_text(g_rv[2], pgs);
+    wolf_text(g_rv[3], mbs);
+    wolf_visible(g_rxbox, g_kind == 2);
+    if (g_rxbody)
+        wolf_text(g_rxbody, g_has_xobj
+            ? "Gorsel/render edilmez; metin+celeri cizilir."
+            : "Metin ve cizimler konumlu cizilir; font gorseli birebir degil.");
+}
+
+static void rightpanel(void)
+{
+    int rx = g_w - S(250);
+    wolf_id rp = wolf_panel(g_root, rx, S(82), S(250), g_h - S(82) - S(28));
+    bgc(rp, C_PANEL); rad(rp, 0); bgo(rp, 100); brd_c(rp, 4, C_PLINE);
+
+    lab(rp, 16, S(16), 218, "Belge", 14, C_TXT, -1);
+
+    static const char *titles[4] = { "Tur", "Boyut", "Icerik", "Sayfa boyu" };
     for (int i = 0; i < 4; i++) {
         int y = S(16) + S(34) + i * (S(46) + S(10));
         wolf_id c = wolf_panel(rp, 16, y, S(218), S(46));
         bgc(c, C_FIELD); bgo(c, 100); rad(c, S(8));
         brd_c(c, 15, C_PLINE);
-        lab(c, S(12), S(6), 194, rows[i][0], 11, C_META, -1);
-        lab(c, S(12), S(24), 194, rows[i][1], 12, C_TXT2, -1);
+        lab(c, S(12), S(6), 194, titles[i], 11, C_META, -1);
+        g_rv[i] = lab(c, S(12), S(24), 194, "—", 12, C_TXT2, -1);
     }
-    if (g_kind == 2) {
-        wolf_id c = wolf_panel(rp, 16, S(16) + S(34) + 4 * (S(46) + S(10)), S(218), S(64));
-        bgc(c, C_FIELD); bgo(c, 100); rad(c, S(8));
-        brd_c(c, 15, C_PLINE);
-        lab(c, S(12), S(6), 194, "Sinirlar", 11, C_META, -1);
-        wolf_id body = wolf_label(c, S(12), S(24),
-            g_has_xobj
-                ? "Gorsel/render edilmez; metin+celeri cizilir."
-                : "Metin ve cizimler konumlu cizilir; font gorseli birebir degil.");
-        wolf_resize(body, S(194), 2 * (F(12) + 6));
-        wolf_style(body, WOLF_SP_TEXT_LONG, 0, 0);
-        fnt(body, 12); tcol(body, C_META);
-    }
+
+    g_rxbox = wolf_panel(rp, 16, S(16) + S(34) + 4 * (S(46) + S(10)), S(218), S(64));
+    bgc(g_rxbox, C_FIELD); bgo(g_rxbox, 100); rad(g_rxbox, S(8));
+    brd_c(g_rxbox, 15, C_PLINE);
+    lab(g_rxbox, S(12), S(6), 194, "Sinirlar", 11, C_META, -1);
+    g_rxbody = wolf_label(g_rxbox, S(12), S(24), "");
+    wolf_resize(g_rxbody, S(194), 2 * (F(12) + 6));
+    wolf_style(g_rxbody, WOLF_SP_TEXT_LONG, 0, 0);
+    fnt(g_rxbody, 12); tcol(g_rxbody, C_META);
+
+    refresh_right();
 }
 
-static void statusbar(void)
+/* durum cubugu metinlerini yerinde gunceller */
+static void refresh_status(void)
 {
-    wolf_id sb = wolf_panel(g_root, 0, g_h - S(28), g_w, S(28));
-    bgc(sb, C_GROUND); rad(sb, 0); bgo(sb, 100); brd_c(sb, 1, C_LINE);
-    int ly = (S(28) - F(12) - 6) / 2;
-    char t[96];
+    char t[96], nb[8];
     t[0] = 0;
     if (g_kind == 2) {
-        char nb[8];
         wolf_itoa(g_npage, nb, sizeof nb);
         scpy(t, sizeof t, nb);
         wolf_strcat(t, sizeof t, " sayfa · PDF");
@@ -1048,22 +1094,53 @@ static void statusbar(void)
         }
     } else if (g_kind == 1) scpy(t, sizeof t, "PNG goruntu");
     else scpy(t, sizeof t, g_err[0] ? g_err : "Dosya secilmedi — Ac ile listeyin");
-    lab(sb, 14, ly, 480, t, 12, C_META, -1);
+    wolf_text(g_st_l, t);
 
     t[0] = 0;
-    if (g_path[0]) { scpy(t, sizeof t, g_path); }
+    if (g_path[0]) scpy(t, sizeof t, g_path);
     else scpy(t, sizeof t, "C:/belgeler · C:/resimler");
-    lab(sb, g_w - S(424), ly, 410, t, 12, C_META, 2);
+    wolf_text(g_st_r, t);
+}
+
+static void statusbar(void)
+{
+    wolf_id sb = wolf_panel(g_root, 0, g_h - S(28), g_w, S(28));
+    bgc(sb, C_GROUND); rad(sb, 0); bgo(sb, 100); brd_c(sb, 1, C_LINE);
+    int ly = (S(28) - F(12) - 6) / 2;
+    g_st_l = lab(sb, 14, ly, 480, "", 12, C_META, -1);
+    g_st_r = lab(sb, g_w - S(424), ly, 410, "", 12, C_META, 2);
+    refresh_status();
 }
 
 /* ---- dosya secme penceresi ---- */
+/* Satirlari yerinde doldurur. Satir nesneleri bir kez kuruldugu icin
+ * pick_cb baglantilari yasar (yeniden kurulumda kimlik tekrari
+ * yuzunden tik geri cagrilari kaybolurdu). */
+static void pick_refresh(void)
+{
+    for (int i = 0; i < PICK_MAX; i++) {
+        int on = i < g_pickn;
+        wolf_visible(g_prow[i], on);
+        if (!on) continue;
+        const char *b = base_name(g_pickv[i]);
+        char line[440];
+        scpy(line, sizeof line, b);
+        wolf_strcat(line, sizeof line, "   ·   ");
+        wolf_strcat(line, sizeof line, g_pickv[i]);
+        wolf_text(g_prow1[i], line);
+        wolf_text(g_prow2[i], ext_is(b, ".pdf") ? "PDF"
+                       : (ext_is(b, ".png") ? "PNG" : "JPG (desteklenmiyor)"));
+    }
+    wolf_visible(g_pickempty, g_pickn == 0);
+}
+
 static void picker(void)
 {
-    wolf_id ov = wolf_panel(g_root, 0, 0, g_w, g_h);
-    bgc(ov, 0x0A0B0E); bgo(ov, 82); rad(ov, 0);
+    g_ov = wolf_panel(g_root, 0, 0, g_w, g_h);
+    bgc(g_ov, 0x0A0B0E); bgo(g_ov, 82); rad(g_ov, 0);
 
     int pw2 = S(560), ph2 = g_h - S(120);
-    wolf_id box = wolf_panel(ov, (g_w - pw2) / 2, S(60), pw2, ph2);
+    wolf_id box = wolf_panel(g_ov, (g_w - pw2) / 2, S(60), pw2, ph2);
     bgc(box, C_PANEL); bgo(box, 100); rad(box, S(12));
     brd_c(box, 15, C_LINE);
     lab(box, 20, S(16), 360, "Ac — PDF ve PNG", 16, C_TXT, -1);
@@ -1079,29 +1156,25 @@ static void picker(void)
     bgo(lst, 0); rad(lst, 0);
     wolf_scrollable(lst, 1);
 
-    if (!g_pickn) {
-        lab(lst, 10, S(10), 480,
-            "Klasorlerde desteklenen dosya yok (C:/belgeler, C:/resimler, C:/masaustu)",
-            12, C_SUB, -1);
-        return;
-    }
-    for (int i = 0; i < g_pickn; i++) {
+    g_pickempty = lab(lst, 10, S(10), 480,
+        "Klasorlerde desteklenen dosya yok (C:/belgeler, C:/resimler, C:/masaustu)",
+        12, C_SUB, -1);
+
+    int lw = (int)((pw2 - S(72)) * 1000 / g_s);
+    for (int i = 0; i < PICK_MAX; i++) {
         int y = i * (S(44) + S(8));
         wolf_id row = wolf_panel(lst, 0, y, pw2 - S(48), S(44));
         bgc(row, C_FIELD); bgo(row, 100); rad(row, S(8));
         brd_c(row, 15, C_PLINE);
         wolf_set_click(row, 1); hov(row, 0x1A1E26);
         wolf_on_click_ex(row, pick_cb, (void *)(long)i);
-        const char *b = base_name(g_pickv[i]);
-        char line[220];
-        scpy(line, sizeof line, b);
-        wolf_strcat(line, sizeof line, "   ·   ");
-        wolf_strcat(line, sizeof line, g_pickv[i]);
-        lab(row, S(12), S(5), (int)((pw2 - S(72)) * 1000 / g_s), line, 12, C_TXT, -1);
-        lab(row, S(12), S(24), (int)((pw2 - S(72)) * 1000 / g_s),
-            ext_is(b, ".pdf") ? "PDF" : (ext_is(b, ".png") ? "PNG" : "JPG (desteklenmiyor)"),
-            10, C_META, -1);
+        g_prow1[i] = lab(row, S(12), S(5), lw, "", 12, C_TXT, -1);
+        g_prow2[i] = lab(row, S(12), S(24), lw, "", 10, C_META, -1);
+        g_prow[i] = row;
+        wolf_visible(row, 0);
     }
+    pick_refresh();
+    wolf_visible(g_ov, g_pick);
 }
 
 /* ---- derleme ---- */
@@ -1124,7 +1197,25 @@ static void build(void)
 
     rightpanel();
     statusbar();
-    if (g_pick) { pick_scan(); picker(); }
+    /* Dosya secme perdesi hep kurulur; yalnizca gorunurlugu degisir.
+     * Boylece "Kapat" ve satir tiklamalari hic olmez. */
+    picker();
+}
+
+/* Icerigi yerinde tazeler: yeniden kurulum YOK. Yeniden kurulumda
+ * wlf_host ayni widget kimliklerini yeniden kullanir ve ev_click
+ * tablosundaki eski kayit yuzunden LV_EVENT_CLICKED yeniden baglanmaz;
+ * tum dugmeler (kapat dahil) olu kalirdi. */
+static void refresh_view(void)
+{
+    set_title_label();
+    set_page_label();
+    set_zoom_label();
+    refresh_thumbs();
+    paint_page();
+    refresh_right();
+    refresh_status();
+    wolf_visible(g_ov, g_pick);
 }
 
 static void rebuild(void)
@@ -1136,7 +1227,13 @@ static void rebuild(void)
 static void on_resz(wolf_id w, void *u)
 {
     (void)w; (void)u;
+    int w0 = g_w, h0 = g_h;
     if (wolf_screen(&g_w, &g_h) != 0) return;
+    /* Pencere acilirken kabuk bir kez SIZE_CHANGED yayar; olcu ayniysa
+     * yeniden kurmayiz. wlf_host'ta yeniden kurulan nesneler ayni widget
+     * kimligini alir ve ev_click tablosunda eski kayit kaldigi icin
+     * LV_EVENT_CLICKED yeniden baglanmaz; sonuc: tum dugmeler olu kalir. */
+    if (g_w == w0 && g_h == h0) return;
     int a = g_w * 1000 / 1280, b = g_h * 1000 / 720;
     g_s = a < b ? a : b;
     if (g_s < 300) g_s = 300;
@@ -1169,6 +1266,7 @@ int wolf_main(const wolf_api_t *api)
         if (g_err[0]) wolf_notify("Mercek", g_err);
     } else {
         g_pick = 1;             /* arg yoksa gercek klasorleri listele */
+        pick_scan();
     }
     build();
     return 0;

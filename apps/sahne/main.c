@@ -103,11 +103,15 @@ static int g_cur;
 static char g_file[128] = "C:/belgeler/sunum.sln";
 static char g_doc[64]   = "sunum.sln";
 
-static wolf_id g_thumb[NSLIDE_MAX], g_tlab[NSLIDE_MAX];
+static wolf_id g_thumb[NSLIDE_MAX], g_tlab[NSLIDE_MAX], g_tnum[NSLIDE_MAX];
 static wolf_id g_slide, g_snum;
+static wolf_id g_title_lab;                 /* baslik cubugundaki belge adi */
+static wolf_id g_flab[5];                   /* slayt alanlari: f=-2..2 */
+static wolf_id g_fdot[3];                   /* madde isaretleri */
 
 /* yerinde duzenleme: aktif giris ve duzenlenen alan */
-static wolf_id g_edit;
+static wolf_id g_edit;                      /* tek ve kalici duzenleme girisi */
+static int g_editing;                       /* giride yazilmakta olan bir alan var mi */
 static int g_ef;
 
 /* freestanding: yapilar atanamaz (memcpy cagrisina doner), bayt bayt kopyala */
@@ -164,17 +168,27 @@ static void titlebar(const char *text)
 {
     wolf_id tb = wolf_panel(g_root, 0, 0, g_w, S(36));
     bgc(tb, C_GROUND); rad(tb, 0); bgo(tb, 100); brd_c(tb, 2, C_LINE);
-    lab(tb, 12, (36 - 12) / 2, 560, text, 12, C_TXT2, -1);
+    g_title_lab = lab(tb, 12, (36 - 12) / 2, 560, text, 12, C_TXT2, -1);
     winbtn(g_w - S(92),  SVG_MIN,   cb_min,   0x262B35);
     winbtn(g_w - S(46),  SVG_CLOSE, cb_close, 0xC42B1C);
 }
 
+static void title_update(void)
+{
+    char t[96];
+    scpy(t, sizeof t, g_doc);
+    sadd(t, sizeof t, " — Sahne");
+    if (g_title_lab) wolf_text(g_title_lab, t);
+}
+
 /* ----ileri bildirimler---- */
 static void paint_slide(void);
+static void refresh_thumbs(void);
 static void status_update(void);
 static void commit_edit(void);
 static void edit_field(int f);
 static void rebuild(void);
+static void refresh_all(void);
 static int  load_doc(int notify, int apply);
 static void save_file(void);
 
@@ -191,7 +205,7 @@ static void rib_new(wolf_id w, void *u)
     g_n++;
     g_cur++;
     sl_blank(&g_sl[g_cur]);   /* arkadasinin ardina bos slayt girer */
-    rebuild();
+    refresh_all();
 }
 
 static void rib_del(wolf_id w, void *u)
@@ -202,7 +216,7 @@ static void rib_del(wolf_id w, void *u)
     for (int i = g_cur; i < g_n - 1; i++) sl_copy(&g_sl[i], &g_sl[i + 1]);
     g_n--;
     if (g_cur >= g_n) g_cur = g_n - 1;
-    rebuild();
+    refresh_all();
 }
 
 static void rib_item(wolf_id w, void *u)
@@ -280,7 +294,8 @@ static int txt_cap(int f) { return f <= -1 ? 96 : 140; }
 /* giride Enter veya baska bir yere tiklama: metni modele dok, giriyi kaldir */
 static void commit_edit(void)
 {
-    if (!g_edit) return;
+    if (!g_editing) return;
+    g_editing = 0;
     char tmp[160];
     if (wolf_text_of(g_edit, tmp, (int)sizeof tmp) > 0) {
         /* Enter giride yeni satir birakabilir: ilk satiri al */
@@ -288,12 +303,19 @@ static void commit_edit(void)
             if (tmp[i] == '\n' || tmp[i] == '\r') { tmp[i] = 0; break; }
         scpy(txt_of(g_ef), txt_cap(g_ef), tmp);
     }
-    wolf_destroy(g_edit);
-    g_edit = 0;
+    /* Giriyi YOK ETMIYORUZ ve GIZLEMIYORUZ da: kabukta wolf_destroy
+     * nesneyi ekrandan kaldirmadi; gizlemede de (LV_OBJ_FLAG_HIDDEN)
+     * LVGL görünür-leme isteğini atlıyor — kutu pikselleri bir sonraki
+     * tıklamaya kadar ekranda kalıyordu. Görebilir nesnede tasima/kucultme
+     * ise dogru invalidate eder: 1 piksele burusturup koseye park ediyoruz
+     * (beyaz slaytta gorunmez). Tek giriyi saklamak widget kimligini ve
+     * Enter baglantisini da koruyor. */
+    wolf_style(g_edit, WOLF_SP_BORDER_WIDTH, 0, 0);
+    wolf_resize(g_edit, 1, 1);
+    wolf_move(g_edit, 0, 0);
     paint_slide();
     /* kucuk resmi tazele: baslik degistiyse ray da gosterir */
-    if (g_cur < g_n && g_tlab[g_cur])
-        wolf_text(g_tlab[g_cur], g_sl[g_cur].title[0] ? g_sl[g_cur].title : "(bos)");
+    refresh_thumbs();
 }
 
 static void edit_enter_cb(wolf_id w, void *u) { (void)w; (void)u; commit_edit(); }
@@ -306,60 +328,107 @@ static void edit_click_cb(wolf_id w, void *u)
 
 static void edit_field(int f)
 {
-    if (f < -2 || f > 2) return;
+    if (f < -2 || f > 2 || !g_edit) return;
     commit_edit();
     g_ef = f;
     int px = fp_of(f);
-    g_edit = wolf_input(g_slide, fx_of(f) - 4, fy_of(f) - 4,
-                        S(fw_of(f)) + 8, F(px) + 18, "");
+    /* Kalici giriyi alanin ustune tası: tek nesne yeniden kullanilir. */
+    wolf_move(g_edit, fx_of(f) - 4, fy_of(f) - 4);
+    wolf_resize(g_edit, S(fw_of(f)) + 8, F(px) + 18);
+    wolf_style(g_edit, WOLF_SP_BORDER_WIDTH, 2, 0);
     wolf_text(g_edit, txt_of(f));
     fnt(g_edit, px);
-    tcol(g_edit, C_INK);
-    bgc(g_edit, C_SLIDE); bgo(g_edit, 100); rad(g_edit, S(3));
-    wolf_style(g_edit, WOLF_SP_BORDER_WIDTH, 2, 0);
-    wolf_style(g_edit, WOLF_SP_BORDER_COLOR, C_ACC, 0);
-    wolf_on_enter_ex(g_edit, edit_enter_cb, 0);
+    wolf_visible(g_edit, 1);
     wolf_to_front(g_edit);
+    g_editing = 1;
 }
 
 /* metin etiketi: tiklanabilir, kullanici alan_no+2 tasir */
-static wolf_id lab_ed(wolf_id p, int f, int wpx, const char *t,
-                      int px, uint32_t col)
+static wolf_id lab_ed(int f, const char *t, int px, uint32_t col)
 {
-    wolf_id l = lab(p, fx_of(f), fy_of(f), wpx, t, px, col, -1);
+    wolf_id l = lab(g_slide, fx_of(f), fy_of(f), fw_of(f), t, px, col, -1);
     wolf_set_click(l, 1);
     wolf_on_click_ex(l, edit_click_cb, (void *)(long)(f + 2));
     return l;
 }
 
-/* ortadaki slayti g_cur icerigiyle bastan ciz */
+/* Alanlar BIR KEZ kurulur (center_right icinden). Icerik degisince
+ * yalnizca metin/renk/gorunurluk tazelenir; boylece tiklanabilirlik
+ * korunur (yeniden kurulan nesneler ayni kimligi aldigi icin kabuk
+ * tik olayini yeniden baglamaz). */
+static void mk_fields(void)
+{
+    for (int f = -2; f <= 2; f++) {
+        g_flab[f + 2] = lab_ed(f, "", fp_of(f), C_INK);
+        if (f >= 0) {
+            wolf_id d = wolf_panel(g_slide, S(56), fy_of(f) + S(5), S(6), S(6));
+            bgc(d, C_ACC); bgo(d, 100); rad(d, S(3));
+            g_fdot[f] = d;
+        }
+    }
+    /* Tek duzenleme girisi: her alanda yeniden kullanilir. Olay baglantisi
+     * (Enter) bir kez ve sabit kimlikle yapildigi icin hic olmez. */
+    g_edit = wolf_input(g_slide, 0, 0, 10, 10, "");
+    fnt(g_edit, 16);
+    tcol(g_edit, C_INK);
+    bgc(g_edit, C_SLIDE); bgo(g_edit, 100); rad(g_edit, S(3));
+    wolf_style(g_edit, WOLF_SP_BORDER_WIDTH, 2, 0);
+    wolf_style(g_edit, WOLF_SP_BORDER_COLOR, C_ACC, 0);
+    wolf_on_enter_ex(g_edit, edit_enter_cb, 0);
+    wolf_visible(g_edit, 0);
+    g_editing = 0;
+}
+
+static void set_field(int f, const char *t, int vis)
+{
+    wolf_id w = g_flab[f + 2];
+    if (!w) return;
+    if (t) wolf_text(w, t);
+    /* bos alan soluk gosterilir (0.8.4 davranisi) */
+    tcol(w, (t && t[0]) ? (f == -2 ? C_INK : (f == -1 ? C_SUB : C_INK))
+                        : (f == -2 ? 0xC9CED8 : 0xD8DCE2));
+    wolf_visible(w, vis);
+    if (f >= 0) wolf_visible(g_fdot[f], vis);
+}
+
+/* ortadaki slaydi g_cur icerigiyle yerinde guncelle */
 static void paint_slide(void)
 {
-    wolf_clear(g_slide);
-    g_edit = 0;
     slide_t *s = &g_sl[g_cur];
-    lab_ed(g_slide, -2, 648, s->title, 34, s->title[0] ? C_INK : 0xC9CED8);
-    lab_ed(g_slide, -1, 648, s->sub, 15, s->sub[0] ? C_SUB : 0xD8DCE2);
-    for (int k = 0; k < s->nitem && k < 3; k++) {
-        wolf_id d = wolf_panel(g_slide, S(56), fy_of(k) + S(5), S(6), S(6));
-        bgc(d, C_ACC); bgo(d, 100); rad(d, S(3));
-        lab_ed(g_slide, k, 620, s->item[k], 16, s->item[k][0] ? C_INK : 0xD8DCE2);
-    }
+    set_field(-2, s->title, 1);
+    set_field(-1, s->sub, 1);
+    for (int k = 0; k < 3; k++)
+        set_field(k, s->item[k], k < s->nitem);
 }
 
 /* ---- sol ray: kucuk resimler (200 px) ---- */
+/* Kucuk resim yuvalari NSLIDE_MAX kadar bir kez kurulur; slayt
+ * eklenip silindiginde yalnizca gorunurluk/metin/cerceve tazelenir. */
+static void refresh_thumbs(void)
+{
+    for (int i = 0; i < NSLIDE_MAX; i++) {
+        int on = i < g_n;
+        wolf_visible(g_thumb[i], on);
+        wolf_visible(g_tnum[i], on);
+        if (!on) continue;
+        const char *ti = g_sl[i].title;
+        wolf_text(g_tlab[i], ti[0] ? ti : "(bos)");
+        tcol(g_tlab[i], ti[0] ? 0x3A4150 : 0xC9CED8);
+        wolf_style(g_thumb[i], WOLF_SP_BORDER_COLOR,
+                   i == g_cur ? C_ACC : C_PLINE, 0);
+        wolf_style(g_thumb[i], WOLF_SP_BORDER_WIDTH, i == g_cur ? 2 : 1, 0);
+    }
+}
+
 static void thumb_cb(wolf_id w, void *u)
 {
     (void)w;
     int i = (int)(long)u;
+    if (i < 0 || i >= g_n) return;   /* havuzdaki bos yuvalar tiklanabilir degil */
     commit_edit();
     if (i == g_cur) return;
     g_cur = i;
-    for (int k = 0; k < g_n; k++) {
-        wolf_style(g_thumb[k], WOLF_SP_BORDER_COLOR,
-                   k == g_cur ? C_ACC : C_PLINE, 0);
-        wolf_style(g_thumb[k], WOLF_SP_BORDER_WIDTH, k == g_cur ? 2 : 1, 0);
-    }
+    refresh_thumbs();
     paint_slide();
     status_update();
 }
@@ -370,25 +439,26 @@ static void leftpanel(void)
     bgc(lp, C_PANEL); rad(lp, 0); bgo(lp, 100); brd_c(lp, 8, C_PLINE);
     wolf_scrollable(lp, 1);
 
-    for (int i = 0; i < g_n; i++) {
+    for (int i = 0; i < NSLIDE_MAX; i++) {
         int y = S(12) + i * (S(96) + S(12));
         char n[4]; int l = 0;
         if (i + 1 >= 10) n[l++] = (char)('0' + (i + 1) / 10);
         n[l++] = (char)('0' + (i + 1) % 10);
         n[l] = 0;
-        lab(lp, S(10), y + S(42), 18, n, 12, C_META, 2);
+        g_tnum[i] = lab(lp, S(10), y + S(42), 18, n, 12, C_META, 2);
 
         wolf_id t = wolf_panel(lp, S(32), y, S(160), S(96));
         bgc(t, C_SLIDE); bgo(t, 100); rad(t, S(3));
-        wolf_style(t, WOLF_SP_BORDER_WIDTH, i == g_cur ? 2 : 1, 0);
-        wolf_style(t, WOLF_SP_BORDER_COLOR, i == g_cur ? C_ACC : C_PLINE, 0);
+        wolf_style(t, WOLF_SP_BORDER_WIDTH, 1, 0);
+        wolf_style(t, WOLF_SP_BORDER_COLOR, C_PLINE, 0);
         wolf_set_click(t, 1); hov(t, 0xF0F1F4);
         wolf_on_click_ex(t, thumb_cb, (void *)(long)i);
         g_thumb[i] = t;
-        const char *ti = g_sl[i].title[0] ? g_sl[i].title : "(bos)";
-        g_tlab[i] = lab(t, S(8), S(8), 144, ti, 9,
-                        g_sl[i].title[0] ? 0x3A4150 : 0xC9CED8, -1);
+        g_tlab[i] = lab(t, S(8), S(8), 144, "", 9, 0x3A4150, -1);
+        wolf_visible(t, 0);
+        wolf_visible(g_tnum[i], 0);
     }
+    refresh_thumbs();
 }
 
 /* ---- orta: tuval + slayt, sag: Tasarim paneli (240) ---- */
@@ -417,6 +487,7 @@ static void center_right(void)
     wolf_style(g_slide, WOLF_SP_SHADOW_COLOR, 0x000000, 0);
     wolf_style(g_slide, WOLF_SP_SHADOW_OPA, 45, 0);
     wolf_style(g_slide, WOLF_SP_SHADOW_OFS_Y, S(8), 0);
+    mk_fields();
     paint_slide();
 
     /* sag panel */
@@ -544,7 +615,7 @@ static int load_doc(int notify, int apply){
     const char *b = g_file;
     for (const char *k = g_file; *k; k++) if (*k == '/') b = k + 1;
     scpy(g_doc, sizeof g_doc, b);
-    if (apply) rebuild();
+    if (apply) refresh_all();
     if (notify) {
         char m[48];
         scpy(m, sizeof m, "Acildi: ");
@@ -602,16 +673,33 @@ static void rebuild(void)
 {
     commit_edit();
     g_edit = 0;
+    g_editing = 0;
     char t[96];
     scpy(t, sizeof t, g_doc);
     sadd(t, sizeof t, " — Sahne");
     wolf_clear(g_root);
     titlebar(t);
     tabribbon();
-    for (int i = 0; i < NSLIDE_MAX; i++) { g_thumb[i] = 0; g_tlab[i] = 0; }
+    for (int i = 0; i < NSLIDE_MAX; i++) { g_thumb[i] = 0; g_tlab[i] = 0; g_tnum[i] = 0; }
+    for (int i = 0; i < 5; i++) g_flab[i] = 0;
+    for (int i = 0; i < 3; i++) g_fdot[i] = 0;
     leftpanel();
     center_right();
     statusbar();
+}
+
+/* Icerik degisiminde (yeni slayt, silme, belge acma) TAM YENIDEN KURULUM
+ * yapmiyoruz: wlf_host yeniden kurulan nesneler ayni widget kimligini
+ * aldigi icin LV_EVENT_CLICKED'i yeniden baglamaz ve kapat dugmesi dahil
+ * her sey olu kalirdi. Nesneler sabit kaldigi icin yalnizca icerik
+ * (metin/gorunurluk/cerceve) tazelenir. */
+static void refresh_all(void)
+{
+    commit_edit();
+    title_update();
+    refresh_thumbs();
+    paint_slide();
+    status_update();
 }
 
 static void on_resz(wolf_id w, void *u)

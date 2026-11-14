@@ -451,7 +451,13 @@ static void build(void);
 static void on_resz(wolf_id w, void *u)
 {
     (void)w; (void)u;
+    int w0 = g_w, h0 = g_h;
     if (wolf_screen(&g_w, &g_h) != 0) return;
+    /* Pencere acilirken kabuk bir kez SIZE_CHANGED yayar; olcu ayniysa
+     * yeniden kurmayiz. wlf_host'ta yeniden kurulan nesneler ayni widget
+     * kimligini alir ve ev_click tablosunda eski kayit kaldigi icin
+     * LV_EVENT_CLICKED yeniden baglanmaz; sonuc: tum dugmeler olu kalir. */
+    if (g_w == w0 && g_h == h0) return;
     int a = g_w * 1000 / 1280, b = g_h * 1000 / 720;
     g_s = a < b ? a : b;
     if (g_s < 300) g_s = 300;
